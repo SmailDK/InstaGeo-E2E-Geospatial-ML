@@ -159,7 +159,7 @@ class PrithviSegmentationModule(pl.LightningModule):
         freeze_backbone: bool = True,
         num_classes: int = 2,
         temporal_step: int = 1,
-        class_weights: List[float] = [1, 2],
+        class_weights: List[float] = [0.01, 0.99],
         ignore_index: int = -100,
         weight_decay: float = 1e-2,
     ) -> None:
