@@ -1,4 +1,4 @@
-# ------------------------------------------------------------------------------
+
 # This code is licensed under the Attribution-NonCommercial-ShareAlike 4.0
 # International (CC BY-NC-SA 4.0) License.
 #
@@ -36,8 +36,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, average_precision_score
-
 
 from instageo.model.dataloader import (
     InstaGeoDataset,
@@ -161,7 +159,7 @@ class PrithviSegmentationModule(pl.LightningModule):
         freeze_backbone: bool = True,
         num_classes: int = 2,
         temporal_step: int = 1,
-        class_weights: List[float] = [1,2],
+        class_weights: List[float] = [1, 2],
         ignore_index: int = -100,
         weight_decay: float = 1e-2,
     ) -> None:
@@ -379,10 +377,6 @@ class PrithviSegmentationModule(pl.LightningModule):
             dict: A dictionary containing 'iou', 'overall_accuracy', and
                 'accuracy_per_class', 'precision_per_class' and 'recall_per_class'.
         """
-
-            # Convert predicted logits to probabilities (Softmax across channels)
-        pred_probs = torch.softmax(pred_mask, dim=1)  # Shape: [batch, num_classes, height, width]
-    
         pred_mask = torch.argmax(pred_mask, dim=1)
         no_ignore = gt_mask.ne(self.ignore_index).to(self.device)
         pred_mask = pred_mask.masked_select(no_ignore).cpu().numpy()
@@ -393,10 +387,6 @@ class PrithviSegmentationModule(pl.LightningModule):
         accuracy_per_class = []
         precision_per_class = []
         recall_per_class = []
-
-        # Prepare for AUC computation
-        flat_gt = []
-        flat_pred = []
 
         for clas in classes:
             pred_cls = pred_mask == clas
@@ -429,14 +419,6 @@ class PrithviSegmentationModule(pl.LightningModule):
             )
             recall_per_class.append(recall)
 
-            # Extract probability for class `clas`
-            class_probs = pred_probs[:, clas, :, :].detach().cpu().numpy().flatten()
-            flat_pred.extend(class_probs)
-            
-            # Compute AUC metrics
-        roc_auc = roc_auc_score(flat_gt, flat_pred) if len(np.unique(flat_gt)) > 1 else 0.0
-        pr_auc = average_precision_score(flat_gt, flat_pred) if len(np.unique(flat_gt)) > 1 else 0.0
-
         # Overall IoU and accuracy
         mean_iou = np.mean(iou_per_class) if iou_per_class else 0.0
         overall_accuracy = np.sum(pred_mask == gt_mask) / gt_mask.size
@@ -448,8 +430,6 @@ class PrithviSegmentationModule(pl.LightningModule):
             "iou_per_class": iou_per_class,
             "precision_per_class": precision_per_class,
             "recall_per_class": recall_per_class,
-            "roc_auc":roc_auc,
-            "pr_auc":pr_auc
         }
 
 
@@ -596,10 +576,10 @@ def main(cfg: DictConfig) -> None:
         checkpoint_callback = ModelCheckpoint(
             monitor="val_mIoU",
             dirpath=hydra_out_dir,
-            filename="instageo_best_checkpoint",
+            filename="instageo_epoch-{epoch:02d}-val_iou-{val_mIoU:.2f}",
             auto_insert_metric_name=False,
             mode="max",
-            save_top_k=1,
+            save_top_k=3,
         )
 
         logger = TensorBoardLogger(hydra_out_dir, name="instageo")
@@ -725,10 +705,83 @@ def main(cfg: DictConfig) -> None:
             ) as dst:
                 dst.write(prediction, 1)
 
+    elif cfg.mode == "sliding_inference":
+        model = PrithviSegmentationModule.load_from_checkpoint(
+            cfg.checkpoint_path,
+            image_size=IM_SIZE,
+            learning_rate=cfg.train.learning_rate,
+            freeze_backbone=cfg.model.freeze_backbone,
+            num_classes=cfg.model.num_classes,
+            temporal_step=cfg.dataloader.temporal_dim,
+            class_weights=cfg.train.class_weights,
+            ignore_index=cfg.train.ignore_index,
+            weight_decay=cfg.train.weight_decay,
+        )
+        model.eval()
+        infer_filepath = os.path.join(root_dir, cfg.test_filepath)
+        assert (
+            os.path.splitext(infer_filepath)[-1] == ".json"
+        ), f"Test file path expects a json file but got {infer_filepath}"
+        output_dir = os.path.join(root_dir, "predictions")
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(infer_filepath)) as json_file:
+            hls_dataset = json.load(json_file)
+        for key, hls_tile_path in tqdm(
+            hls_dataset.items(), desc="Processing HLS Dataset"
+        ):
+            try:
+                hls_tile, _ = process_data(
+                    hls_tile_path,
+                    None,
+                    bands=cfg.dataloader.bands,
+                    no_data_value=cfg.dataloader.no_data_value,
+                    constant_multiplier=cfg.dataloader.constant_multiplier,
+                    mask_cloud=cfg.test.mask_cloud,
+                    replace_label=cfg.dataloader.replace_label,
+                    reduce_to_zero=cfg.dataloader.reduce_to_zero,
+                )
+            except rasterio.RasterioIOError:
+                continue
+            nan_mask = hls_tile == cfg.dataloader.no_data_value
+            nan_mask = np.any(nan_mask, axis=0).astype(int)
+            hls_tile, _ = process_and_augment(
+                hls_tile,
+                None,
+                mean=cfg.dataloader.mean,
+                std=cfg.dataloader.std,
+                temporal_size=cfg.dataloader.temporal_dim,
+                augment=False,
+            )
+            prediction = sliding_window_inference(
+                hls_tile,
+                model,
+                window_size=(cfg.test.img_size, cfg.test.img_size),
+                stride=cfg.test.stride,
+                batch_size=cfg.train.batch_size,
+                device=get_device(),
+            )
+            prediction = np.where(nan_mask == 1, np.nan, prediction)
+            prediction_filename = os.path.join(output_dir, f"{key}_prediction.tif")
+            with rasterio.open(hls_tile_path["tiles"]["B02_0"]) as src:
+                crs = src.crs
+                transform = src.transform
+            with rasterio.open(
+                prediction_filename,
+                "w",
+                driver="GTiff",
+                height=prediction.shape[0],
+                width=prediction.shape[1],
+                count=1,
+                dtype=str(prediction.dtype),
+                crs=crs,
+                transform=transform,
+            ) as dst:
+                dst.write(prediction, 1)
+
     # TODO: Add support for chips that are greater than image size used for training
     elif cfg.mode == "chip_inference":
         check_required_flags(["root_dir", "test_filepath", "checkpoint_path"], cfg)
-        output_dir = cfg.output_dir
+        output_dir = os.path.join(root_dir, "predictions")
         os.makedirs(output_dir, exist_ok=True)
         test_dataset = InstaGeoDataset(
             filename=test_filepath,
