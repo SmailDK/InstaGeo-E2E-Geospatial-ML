@@ -19,6 +19,7 @@ pre-commit
 pytest
 setuptools
 streamlit
+scikit-learn
 tqdm
 pytest-cov
 rioxarray
