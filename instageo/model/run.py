@@ -36,6 +36,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+from sklearn.metrics import roc_auc_score, average_precision_score
+
 
 from instageo.model.dataloader import (
     InstaGeoDataset,
@@ -388,6 +390,10 @@ class PrithviSegmentationModule(pl.LightningModule):
         precision_per_class = []
         recall_per_class = []
 
+        # Prepare for AUC computation
+        flat_gt = []
+        flat_pred = []
+
         for clas in classes:
             pred_cls = pred_mask == clas
             gt_cls = gt_mask == clas
@@ -419,6 +425,14 @@ class PrithviSegmentationModule(pl.LightningModule):
             )
             recall_per_class.append(recall)
 
+              # Store values for AUC computation
+            flat_gt.extend(gt_cls.astype(int))
+            flat_pred.extend(pred_mask[:, clas].cpu().numpy().flatten())  # Use softmax probs if available
+
+        # Compute AUC metrics
+        roc_auc = roc_auc_score(flat_gt, flat_pred) if len(np.unique(flat_gt)) > 1 else 0.0
+        pr_auc = average_precision_score(flat_gt, flat_pred) if len(np.unique(flat_gt)) > 1 else 0.0
+
         # Overall IoU and accuracy
         mean_iou = np.mean(iou_per_class) if iou_per_class else 0.0
         overall_accuracy = np.sum(pred_mask == gt_mask) / gt_mask.size
@@ -430,6 +444,8 @@ class PrithviSegmentationModule(pl.LightningModule):
             "iou_per_class": iou_per_class,
             "precision_per_class": precision_per_class,
             "recall_per_class": recall_per_class,
+            "roc_auc":roc_auc,
+            "pr_auc":pr_auc
         }
 
 
