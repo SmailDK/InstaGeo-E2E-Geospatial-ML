@@ -430,7 +430,7 @@ class PrithviSegmentationModule(pl.LightningModule):
             recall_per_class.append(recall)
 
             # Extract probability for class `clas`
-            class_probs = pred_probs[:, clas, :, :].masked_select(no_ignore).detach().cpu().numpy()
+            class_probs = pred_probs[:, clas, :, :].detach().cpu().numpy().flatten()
             flat_pred.extend(class_probs)
             
             # Compute AUC metrics
