@@ -379,6 +379,10 @@ class PrithviSegmentationModule(pl.LightningModule):
             dict: A dictionary containing 'iou', 'overall_accuracy', and
                 'accuracy_per_class', 'precision_per_class' and 'recall_per_class'.
         """
+
+            # Convert predicted logits to probabilities (Softmax across channels)
+        pred_probs = torch.softmax(pred_mask, dim=1)  # Shape: [batch, num_classes, height, width]
+    
         pred_mask = torch.argmax(pred_mask, dim=1)
         no_ignore = gt_mask.ne(self.ignore_index).to(self.device)
         pred_mask = pred_mask.masked_select(no_ignore).cpu().numpy()
@@ -425,11 +429,11 @@ class PrithviSegmentationModule(pl.LightningModule):
             )
             recall_per_class.append(recall)
 
-              # Store values for AUC computation
-            flat_gt.extend(gt_cls.astype(int))
-            flat_pred.extend(pred_mask[:, clas].cpu().numpy().flatten())  # Use softmax probs if available
-
-        # Compute AUC metrics
+            # Extract probability for class `clas`
+            class_probs = pred_probs[:, clas, :, :].masked_select(no_ignore).cpu().numpy()
+            flat_pred.extend(class_probs)
+            
+            # Compute AUC metrics
         roc_auc = roc_auc_score(flat_gt, flat_pred) if len(np.unique(flat_gt)) > 1 else 0.0
         pr_auc = average_precision_score(flat_gt, flat_pred) if len(np.unique(flat_gt)) > 1 else 0.0
 
